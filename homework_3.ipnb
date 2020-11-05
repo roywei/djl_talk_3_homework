@@ -1,0 +1,290 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "// %mavenRepo snapshots https://oss.sonatype.org/content/repositories/snapshots/\n",
+    "\n",
+    "%maven ai.djl:api:0.8.0\n",
+    "%maven ai.djl:basicdataset:0.8.0\n",
+    "%maven ai.djl.mxnet:mxnet-engine:0.8.0\n",
+    "%maven ai.djl.mxnet:mxnet-model-zoo:0.8.0\n",
+    "%maven org.slf4j:slf4j-api:1.7.26\n",
+    "%maven org.slf4j:slf4j-simple:1.7.26\n",
+    "%maven net.java.dev.jna:jna:5.3.0\n",
+    "\n",
+    "// See https://github.com/awslabs/djl/blob/master/mxnet/mxnet-engine/README.md\n",
+    "// for more MXNet library selection options\n",
+    "%maven ai.djl.mxnet:mxnet-native-auto:1.7.0-backport"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import ai.djl.*;\n",
+    "import ai.djl.basicdataset.*;\n",
+    "import ai.djl.modality.*;\n",
+    "import ai.djl.modality.cv.*;\n",
+    "import ai.djl.modality.cv.transform.*;\n",
+    "import ai.djl.ndarray.*;\n",
+    "import ai.djl.ndarray.types.*;\n",
+    "import ai.djl.nn.*;\n",
+    "import ai.djl.nn.core.*;\n",
+    "import ai.djl.repository.zoo.*;\n",
+    "import ai.djl.training.*;\n",
+    "import ai.djl.training.dataset.*;\n",
+    "import ai.djl.training.initializer.*;\n",
+    "import ai.djl.training.listener.*;\n",
+    "import ai.djl.training.loss.*;\n",
+    "import ai.djl.training.evaluator.*;\n",
+    "import ai.djl.training.optimizer.*;\n",
+    "import ai.djl.training.tracker.*;\n",
+    "import ai.djl.training.util.*;\n",
+    "import ai.djl.translate.*;\n",
+    "import java.nio.file.*;\n",
+    "import java.util.*;\n",
+    "import java.util.concurrent.*;"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "1. 请利用Criteria API读取DJL ModelZoo里的预训练模型"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Loading:     100% |████████████████████████████████████████|\n"
+     ]
+    }
+   ],
+   "source": [
+    "Criteria<Image, Classifications> criteria = Criteria.builder()\n",
+    "     //选择需要读取的预训练模型\n",
+    "    .setTypes(Image.class, Classifications.class)\n",
+    "    .optProgress(new ProgressBar())\n",
+    "    .optArtifactId(\"resnet\")\n",
+    "    .optFilter(\"layers\", \"50\")\n",
+    "    .optFilter(\"flavor\", \"v1\")\n",
+    "    .build();\n",
+    "Model model = ModelZoo.loadModel(criteria);"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "2. 去掉预训练模型的最后一个全连接层， 加上一个102个分类的全连接层(Linear Block)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "SymbolBlock block = (SymbolBlock) model.getBlock();\n",
+    "block.removeLastBlock();\n",
+    "\n",
+    "SequentialBlock newBlock = new SequentialBlock();\n",
+    "newBlock.add(block);\n",
+    "//添加一个batch flatten层用来把前面的二维输出转化为一维，给全连接层\n",
+    "//添加一个新的102分类全连接层\n",
+    "newBlock.add(Blocks.batchFlattenBlock());\n",
+    "newBlock.add(Linear.builder().setUnits(10).build());\n",
+    "model.setBlock(newBlock);"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "3. 准备数据集： [102分类花朵数据集](ttps://www.robots.ox.ac.uk/~vgg/data/flowers/102/index.html)\n",
+    "\n",
+    "下载地址：https://d2l-java-resources.s3.amazonaws.com/flower_dataset.zip"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import ai.djl.training.util.DownloadUtils;\n",
+    "import ai.djl.util.ZipUtils;\n",
+    "\n",
+    "URL url = new URL(\"https://d2l-java-resources.s3.amazonaws.com/flower_dataset.zip\");\n",
+    "ZipUtils.unzip(url.openStream(), Paths.get(\"./\"))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import ai.djl.basicdataset.ImageFolder;\n",
+    "import ai.djl.repository.Repository;\n",
+    "\n",
+    "int batchSize = 32;\n",
+    "float[] mean = {0.485f, 0.456f, 0.406f};\n",
+    "float[] std = {0.229f, 0.224f, 0.225f};\n",
+    "int resize_w = 224;\n",
+    "int resize_h = 224;\n",
+    "\n",
+    "\n",
+    "ImageFolder trainDataset =\n",
+    "    ImageFolder.builder()\n",
+    "    .setRepository(Repository.newInstance(\"flower_train\", \"flower_dataset/train\"))\n",
+    "    .optPipeline(\n",
+    "        // create preprocess pipeline you want\n",
+    "        new Pipeline()\n",
+    "            .add(new CenterCrop())\n",
+    "            .add(new Resize(resize_w, resize_h))\n",
+    "            .add(new ToTensor())\n",
+    "            .add(new Normalize(mean, std)))\n",
+    "    .setSampling(batchSize, true)\n",
+    "    .build();\n",
+    "// call prepare before using\n",
+    "train_dataset.prepare(new ProgressBar());\n",
+    "train_dataset.getSynset();\n",
+    "\n",
+    "ImageFolder testDataset =\n",
+    "    ImageFolder.builder()\n",
+    "    .setRepository(Repository.newInstance(\"flower_test\", \"flower_dataset/test\"))\n",
+    "    .optPipeline(\n",
+    "        // create preprocess pipeline you want\n",
+    "        new Pipeline()\n",
+    "            .add(new CenterCrop())\n",
+    "            .add(new Resize(resize_w, resize_h))\n",
+    "            .add(new ToTensor())\n",
+    "            .add(new Normalize(mean, std)))\n",
+    "    .setSampling(batchSize, true)\n",
+    "    .build();"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "4. 配置TrainingConfig, 选择softmaxCrossEntropy作为损失函数，Accuracy作为Evaluator，在一个GPU上进行训练"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "DefaultTrainingConfig config = new DefaultTrainingConfig(Loss.softmaxCrossEntropyLoss())\n",
+    "    //softmaxCrossEntropyLoss is a standard loss for classification problems\n",
+    "    .addEvaluator(new Accuracy()) // Use accuracy so we humans can understand how accurate the model is\n",
+    "    .optDevices(Device.getDevices(1)) // Limit your GPU, using more GPU actually will slow down coverging\n",
+    "    .addTrainingListeners(TrainingListener.Defaults.basic());\n",
+    "\n",
+    "Trainer trainer = model.newTrainer(config);"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "int epoch = 10;\n",
+    "Shape inputShape = new Shape(1, 3, resize_w, resize_h);\n",
+    "trainer.initialize(inputShape);\n",
+    "trainer.setMetrics(new Metrics());"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "5. 用EasyTrain的fit方法进行训练"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Training:     71% |█████████████████████████████           | "
+     ]
+    }
+   ],
+   "source": [
+    "EasyTrain.fit(trainer, epoch, trainDataset, testDataset)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "6. 保存模型到本地"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "Path modelDir = Paths.get(\"build/resnet\");\n",
+    "Files.createDirectories(modelDir);\n",
+    "\n",
+    "model.setProperty(\"Epoch\", String.valueOf(epoch));\n",
+    "model.save(modelDir, \"resnet\");"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "7. 读取刚刚保存的模型，对一张花朵图片做预测"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Java",
+   "language": "java",
+   "name": "java"
+  },
+  "language_info": {
+   "codemirror_mode": "java",
+   "file_extension": ".jshell",
+   "mimetype": "text/x-java-source",
+   "name": "Java",
+   "pygments_lexer": "java",
+   "version": "11.0.9+11-Ubuntu-0ubuntu1.18.04.1"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
